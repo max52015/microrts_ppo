@@ -1,0 +1,3 @@
+[submodule "gym-microrts-paper"]
+	path = gym-microrts-paper
+	url = https://github.com/vwxyzjn/gym-microrts-paper.git
