@@ -24,10 +24,6 @@ import wandb
 
 
 def parse_args():
-
-def set_environment():
-    run = None
-    CHECKPOINT_FREQUENCY = 50
     
     # Argument parsing
     parser = argparse.ArgumentParser(description="PPO agent")
@@ -204,7 +200,6 @@ def set_environment(args):
             record_video_trigger=lambda x: x % 1000000 == 0,
             video_length=2000,
         )
-    return device, envs, writer, experiment_name, run, CHECKPOINT_FREQUENCY
     args.batch_size = args.num_envs * args.num_steps
     args.minibatch_size = args.batch_size // args.n_minibatch
 
@@ -483,7 +478,6 @@ class Agent(nn.Module):
         # -------- sample mode --------
         if action is None:
             source_mask = self._get_source_mask(B)
-            
             if source_mask.sum().item() == 0:
                 raise RuntimeError("source_mask all False! Invalid action mask!")
 
@@ -824,10 +818,6 @@ def main():
     train(envs, agent, args, writer, device, run, cp_freq, enviroment_name)
 
 
-if __name__ == "__main__":
-    main()
-    envs.close()
-    writer.close()
 
 if __name__ == "__main__":
     main()
