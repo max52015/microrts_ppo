@@ -25,19 +25,41 @@ from stable_baselines3.common.vec_env import VecEnvWrapper, VecVideoRecorder
 def set_environment():
     run = None
     CHECKPOINT_FREQUENCY = 50
-    
+
     # Argument parsing
     parser = argparse.ArgumentParser(description="PPO agent")
     # Common args
-    parser.add_argument("--exp-name", type=str, default=os.path.basename(__file__).rstrip(".py"))
+    parser.add_argument(
+        "--exp-name", type=str, default=os.path.basename(__file__).rstrip(".py")
+    )
     parser.add_argument("--gym-id", type=str, default="MicrortsDefeatCoacAIShaped-v3")
     parser.add_argument("--learning-rate", type=float, default=2.5e-4)
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--total-timesteps", type=int, default=100000000)
-    parser.add_argument("--torch-deterministic", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True)
-    parser.add_argument("--cuda", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True)
-    parser.add_argument("--prod-mode", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True)
-    parser.add_argument("--capture-video", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True)
+    parser.add_argument(
+        "--torch-deterministic",
+        type=lambda x: bool(strtobool(x)),
+        default=True,
+        nargs="?",
+        const=True,
+    )
+    parser.add_argument(
+        "--cuda", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True
+    )
+    parser.add_argument(
+        "--prod-mode",
+        type=lambda x: bool(strtobool(x)),
+        default=False,
+        nargs="?",
+        const=True,
+    )
+    parser.add_argument(
+        "--capture-video",
+        type=lambda x: bool(strtobool(x)),
+        default=False,
+        nargs="?",
+        const=True,
+    )
     parser.add_argument("--wandb-project-name", type=str, default="cleanRL")
     parser.add_argument("--wandb-entity", type=str, default=None)
     # Algorithm-specific
@@ -51,13 +73,45 @@ def set_environment():
     parser.add_argument("--max-grad-norm", type=float, default=0.5)
     parser.add_argument("--clip-coef", type=float, default=0.1)
     parser.add_argument("--update-epochs", type=int, default=4)
-    parser.add_argument("--kle-stop", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True)
-    parser.add_argument("--kle-rollback", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True)
+    parser.add_argument(
+        "--kle-stop",
+        type=lambda x: bool(strtobool(x)),
+        default=False,
+        nargs="?",
+        const=True,
+    )
+    parser.add_argument(
+        "--kle-rollback",
+        type=lambda x: bool(strtobool(x)),
+        default=False,
+        nargs="?",
+        const=True,
+    )
     parser.add_argument("--target-kl", type=float, default=0.03)
-    parser.add_argument("--gae", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True)
-    parser.add_argument("--norm-adv", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True)
-    parser.add_argument("--anneal-lr", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True)
-    parser.add_argument("--clip-vloss", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True)
+    parser.add_argument(
+        "--gae", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True
+    )
+    parser.add_argument(
+        "--norm-adv",
+        type=lambda x: bool(strtobool(x)),
+        default=True,
+        nargs="?",
+        const=True,
+    )
+    parser.add_argument(
+        "--anneal-lr",
+        type=lambda x: bool(strtobool(x)),
+        default=True,
+        nargs="?",
+        const=True,
+    )
+    parser.add_argument(
+        "--clip-vloss",
+        type=lambda x: bool(strtobool(x)),
+        default=True,
+        nargs="?",
+        const=True,
+    )
 
     args = parser.parse_args()
     if not args.seed:
@@ -90,8 +144,15 @@ def set_environment():
     envs = VecMonitor(envs)
     envs = VecPyTorch(envs, device)
     if args.capture_video:
-        experiment_name = f"{args.gym_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
-        envs = VecVideoRecorder(envs, f"videos/{experiment_name}", record_video_trigger=lambda x: x % 1000000 == 0, video_length=2000)
+        experiment_name = (
+            f"{args.gym_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
+        )
+        envs = VecVideoRecorder(
+            envs,
+            f"videos/{experiment_name}",
+            record_video_trigger=lambda x: x % 1000000 == 0,
+            video_length=2000,
+        )
 
     # Writer
     experiment_name = f"{args.gym_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
@@ -104,7 +165,15 @@ def set_environment():
 
     # Optional wandb
     if args.prod_mode:
-        run = wandb.init(project=args.wandb_project_name, entity=args.wandb_entity, config=vars(args), name=experiment_name, monitor_gym=True, save_code=True)
+        run = wandb.init(
+            project=args.wandb_project_name,
+            entity=args.wandb_entity,
+            config=vars(args),
+            name=experiment_name,
+            monitor_gym=True,
+            save_code=True,
+        )
+        wandb.tensorboard.patch(save=False)
         writer = SummaryWriter(f"/tmp/{experiment_name}")
 
     return args, device, envs, writer, experiment_name, run, CHECKPOINT_FREQUENCY
@@ -193,6 +262,7 @@ class MicroRTSStatsRecorder(VecEnvWrapper):
                 self.raw_rewards[i] = []
                 newinfos[i] = info
         return obs, rews, dones, newinfos
+
 
 # ALGO LOGIC: initialize agent here:
 class CategoricalMasked(Categorical):
@@ -285,23 +355,23 @@ class Agent(nn.Module):
         self.device = device
         # Backbone：三層 ConvSequence
         c, h, w = envs.observation_space.shape[::-1]
-        shape = (c , h, w)
+        shape = (c, h, w)
         convs = []
-        for oc in (16,32,32):
+        for oc in (16, 32, 32):
             seq = ConvSequence(shape, oc)
             shape = seq.get_output_shape()
             convs.append(seq)
         convs += [
             nn.Flatten(),
             nn.ReLU(),
-            nn.Linear(shape[0]*shape[1]*shape[2], 256),
-            nn.ReLU()
+            nn.Linear(shape[0] * shape[1] * shape[2], 256),
+            nn.ReLU(),
         ]
         self.network = nn.Sequential(*convs)
-        self.actor  = MicrortsUtils.layer_init(nn.Linear(256, envs.action_space.nvec.sum()), 0.01)
+        self.actor = MicrortsUtils.layer_init(
+            nn.Linear(256, envs.action_space.nvec.sum()), 0.01
+        )
         self.critic = MicrortsUtils.layer_init(nn.Linear(256, 1), 1.0)
-
-
 
     # ---------------------------------------------------------
     def forward(self, obs):
@@ -336,11 +406,18 @@ class Agent(nn.Module):
         # -------- sample mode --------
         if action is None:
             source_mask = self._get_source_mask(B)
+            
+            if source_mask.sum().item() == 0:
+                raise RuntimeError("source_mask all False! Invalid action mask!")
+
             src_cat = CategoricalMasked(logits=split_logits[0], masks=source_mask)
             src_act = src_cat.sample()
 
             # parameter masks for each env
             param_mask = self._get_action_mask(src_act.cpu().numpy())
+            if param_mask.sum().item() == 0:
+                raise RuntimeError("param_mask all False! Invalid action mask!")
+            
             split_param_masks = torch.split(param_mask, splits[1:], dim=1)
 
             acts = [src_act]
@@ -357,9 +434,12 @@ class Agent(nn.Module):
         entropy = torch.stack([c.entropy() for c in cats]).sum(0)
         return action, logprob, entropy, invalid_action_masks
 
+
 def main():
     # 初始化環境與參數
-    args, device, envs, writer , experiment_name, run, CHECKPOINT_FREQUENCY = set_environment()
+    args, device, envs, writer, experiment_name, run, CHECKPOINT_FREQUENCY = (
+        set_environment()
+    )
     agent = Agent(envs, device).to(device)
     optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
     if args.anneal_lr:
@@ -367,9 +447,9 @@ def main():
         lr = lambda f: f * args.learning_rate
 
     # ALGO Logic: Storage for epoch data
-    obs = torch.zeros((args.num_steps, args.num_envs) + envs.observation_space.shape).to(
-        device
-    )
+    obs = torch.zeros(
+        (args.num_steps, args.num_envs) + envs.observation_space.shape
+    ).to(device)
     actions = torch.zeros((args.num_steps, args.num_envs) + envs.action_space.shape).to(
         device
     )
@@ -403,6 +483,9 @@ def main():
         agent.eval()
         print(f"resumed at update {starting_update}")
 
+    early_stop_K = 10  # 看過去多少次 update
+    early_stop_max_var = 0.05  # 最小進步幅度
+    recent_rewards = []  # 存每個update的平均reward
 
     for update in range(starting_update, num_updates + 1):
         # Annealing the rate if instructed to do so.
@@ -414,7 +497,7 @@ def main():
         # TRY NOT TO MODIFY: prepare the execution of the game.
         for step in range(0, args.num_steps):
             # print(f"[DEBUG] get_value = {agent.get_value}")
-            envs.render()
+            # envs.render()
             global_step += 1 * args.num_envs
             obs[step] = next_obs
             dones[step] = next_done
@@ -462,10 +545,13 @@ def main():
                         nextnonterminal = 1.0 - dones[t + 1]
                         nextvalues = values[t + 1]
                     delta = (
-                        rewards[t] + args.gamma * nextvalues * nextnonterminal - values[t]
+                        rewards[t]
+                        + args.gamma * nextvalues * nextnonterminal
+                        - values[t]
                     )
                     advantages[t] = lastgaelam = (
-                        delta + args.gamma * args.gae_lambda * nextnonterminal * lastgaelam
+                        delta
+                        + args.gamma * args.gae_lambda * nextnonterminal * lastgaelam
                     )
                 returns = advantages + values
             else:
@@ -565,6 +651,20 @@ def main():
                     agent.load_state_dict(target_agent.state_dict())
                     break
 
+        # early stop 判斷
+        avg_reward = float(rewards.mean().cpu().item())
+        recent_rewards.append(avg_reward)
+        if len(recent_rewards) > early_stop_K:
+            recent_rewards.pop(0)  # 保持長度 = K
+        if len(recent_rewards) == early_stop_K:
+            mean_r = np.mean(recent_rewards)
+            std_r = np.std(recent_rewards)
+            if std_r / (mean_r + 1e-8) < early_stop_max_var:
+                print(f"Early stopping triggered at update {update}!")
+                if args.prod_mode:
+                    torch.save(agent.state_dict(), f"{wandb.run.dir}/agent.pt")
+                break
+
         ## CRASH AND RESUME LOGIC:
         if args.prod_mode:
             if not os.path.exists(f"models/{experiment_name}"):
@@ -593,6 +693,7 @@ def main():
 
     envs.close()
     writer.close()
+
 
 if __name__ == "__main__":
     main()
