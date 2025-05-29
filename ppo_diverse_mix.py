@@ -1,4 +1,5 @@
 import torch
+import wandb
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
@@ -23,6 +24,12 @@ import wandb
 
 
 def parse_args():
+
+def set_environment():
+    run = None
+    CHECKPOINT_FREQUENCY = 50
+    
+    # Argument parsing
     parser = argparse.ArgumentParser(description="PPO agent")
     # Common arguments
     parser.add_argument(
@@ -108,6 +115,36 @@ def parse_args():
         nargs="?",
         const=True,
     )
+    # Common args
+    parser.add_argument("--exp-name", type=str, default=os.path.basename(__file__).rstrip(".py"))
+    parser.add_argument("--gym-id", type=str, default="MicrortsDefeatCoacAIShaped-v3")
+    parser.add_argument("--learning-rate", type=float, default=2.5e-4)
+    parser.add_argument("--seed", type=int, default=1)
+    parser.add_argument("--total-timesteps", type=int, default=100000000)
+    parser.add_argument("--torch-deterministic", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True)
+    parser.add_argument("--cuda", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True)
+    parser.add_argument("--prod-mode", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True)
+    parser.add_argument("--capture-video", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True)
+    parser.add_argument("--wandb-project-name", type=str, default="cleanRL")
+    parser.add_argument("--wandb-entity", type=str, default=None)
+    # Algorithm-specific
+    parser.add_argument("--n-minibatch", type=int, default=4)
+    parser.add_argument("--num-envs", type=int, default=24)
+    parser.add_argument("--num-steps", type=int, default=512)
+    parser.add_argument("--gamma", type=float, default=0.99)
+    parser.add_argument("--gae-lambda", type=float, default=0.95)
+    parser.add_argument("--ent-coef", type=float, default=0.01)
+    parser.add_argument("--vf-coef", type=float, default=0.5)
+    parser.add_argument("--max-grad-norm", type=float, default=0.5)
+    parser.add_argument("--clip-coef", type=float, default=0.1)
+    parser.add_argument("--update-epochs", type=int, default=4)
+    parser.add_argument("--kle-stop", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True)
+    parser.add_argument("--kle-rollback", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True)
+    parser.add_argument("--target-kl", type=float, default=0.03)
+    parser.add_argument("--gae", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True)
+    parser.add_argument("--norm-adv", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True)
+    parser.add_argument("--anneal-lr", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True)
+    parser.add_argument("--clip-vloss", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True)
 
     args = parser.parse_args()
     if not args.seed:
@@ -168,6 +205,52 @@ def set_environment(args):
             video_length=2000,
         )
     return device, envs, writer, experiment_name, run, CHECKPOINT_FREQUENCY
+    args.batch_size = args.num_envs * args.num_steps
+    args.minibatch_size = args.batch_size // args.n_minibatch
+
+    # Device setup
+    device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
+    print("CUDA available:", torch.cuda.is_available())
+    print("CUDA version:", torch.version.cuda)
+    print(f"Using device: {device}")
+
+    # Seeding
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    torch.backends.cudnn.deterministic = args.torch_deterministic
+
+    # Environment
+    envs = MicroRTSVecEnv(
+        num_envs=args.num_envs,
+        max_steps=2000,
+        render_theme=2,
+        ai2s=[microrts_ai.coacAI for _ in range(args.num_envs)],
+        map_path="maps/16x16/basesWorkers16x16.xml",
+        reward_weight=np.array([10.0, 1.0, 1.0, 0.2, 1.0, 4.0]),
+    )
+    envs = MicroRTSStatsRecorder(envs, args.gamma)
+    envs = VecMonitor(envs)
+    envs = VecPyTorch(envs, device)
+    if args.capture_video:
+        experiment_name = f"{args.gym_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
+        envs = VecVideoRecorder(envs, f"videos/{experiment_name}", record_video_trigger=lambda x: x % 1000000 == 0, video_length=2000)
+
+    # Writer
+    experiment_name = f"{args.gym_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
+    writer = SummaryWriter(f"runs/{experiment_name}")
+    writer.add_text(
+        "hyperparameters",
+        "|param|value|\n|-|-|\n%s"
+        % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
+    )
+
+    # Optional wandb
+    if args.prod_mode:
+        run = wandb.init(project=args.wandb_project_name, entity=args.wandb_entity, config=vars(args), name=experiment_name, monitor_gym=True, save_code=True)
+        writer = SummaryWriter(f"/tmp/{experiment_name}")
+
+    return args, device, envs, writer, experiment_name, run, CHECKPOINT_FREQUENCY
 
 
 class VecMonitor(VecEnvWrapper):
@@ -254,7 +337,6 @@ class MicroRTSStatsRecorder(VecEnvWrapper):
                 newinfos[i] = info
         return obs, rews, dones, newinfos
 
-
 # ALGO LOGIC: initialize agent here:
 class CategoricalMasked(Categorical):
     def __init__(self, *, logits, masks):
@@ -276,18 +358,21 @@ class Scale(nn.Module):
         return x * self.scale
 
 
-def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
-    nn.init.orthogonal_(layer.weight, std)
-    nn.init.constant_(layer.bias, bias_const)
-    return layer
+class MicrortsUtils:
+    def layer_init(layer, std: float = np.sqrt(2), bias_const: float = 0.0):
+        torch.nn.init.orthogonal_(layer.weight, std)
+        torch.nn.init.constant_(layer.bias, bias_const)
+        return layer
 
+    def index_to_coord(idx, map_size=16):
+        return idx % map_size, idx // map_size
 
-def predict_destination(pos, action, move_actions=[0, 1, 2, 3]):
-    directions = {0: (0, -1), 1: (1, 0), 2: (0, 1), 3: (-1, 0)}
-    if action in move_actions:
-        dx, dy = directions[action]
-        return (pos[0] + dx, pos[1] + dy)
-    return pos
+    def predict_destination(pos, action, move_actions=[0, 1, 2, 3]):
+        directions = {0: (0, -1), 1: (1, 0), 2: (0, 1), 3: (-1, 0)}
+        if action in move_actions:
+            dx, dy = directions[action]
+            return (pos[0] + dx, pos[1] + dy)
+        return pos
 
 
 def index_to_coord(idx, map_size=16):
@@ -345,22 +430,25 @@ class Agent(nn.Module):
         super().__init__()
         self.envs = envs
         self.device = device
-        h, w, c = envs.observation_space.shape
-        self.network = nn.Sequential(
-            nn.Conv2d(c, 16, kernel_size=3, padding=1),
-            nn.MaxPool2d(kernel_size=2),
-            nn.ReLU(),
-            nn.Conv2d(16, 32, kernel_size=3, padding=1),
-            nn.MaxPool2d(kernel_size=2),
-            nn.ReLU(),
+        # Backbone：三層 ConvSequence
+        c, h, w = envs.observation_space.shape[::-1]
+        shape = (c , h, w)
+        convs = []
+        for oc in (8,16,16):
+            seq = ConvSequence(shape, oc)
+            shape = seq.get_output_shape()
+            convs.append(seq)
+        convs += [
             nn.Flatten(),
-            nn.Linear(32 * ((h // 4) * (w // 4)), 128),  # Reduced from 256 to 128
             nn.ReLU(),
-        )
-        self.actor = layer_init(nn.Linear(128, envs.action_space.nvec.sum()), std=0.01)
-        self.critic = layer_init(nn.Linear(128, 1), std=1)
-        # caches
-        self.cached_loc_mask = None
+            nn.Linear(shape[0]*shape[1]*shape[2], 128),
+            nn.ReLU()
+        ]
+        self.network = nn.Sequential(*convs)
+        self.actor  = MicrortsUtils.layer_init(nn.Linear(128, envs.action_space.nvec.sum()), 0.01)
+        self.critic = MicrortsUtils.layer_init(nn.Linear(128, 1), 1.0)
+
+
 
     # ---------------------------------------------------------
     def forward(self, obs):
@@ -429,6 +517,14 @@ def train(envs, agent, args, writer, device, run=None, CHECKPOINT_FREQUENCY=None
     if args.anneal_lr:
         # https://github.com/openai/baselines/blob/ea25b9e8b234e6ee1bca43083f8f3cf974143998/baselines/ppo2/defaults.py#L20
         lr = lambda f: f * args.learning_rate
+def main():
+    # 初始化環境與參數
+    args, device, envs, writer , experiment_name, run, CHECKPOINT_FREQUENCY = set_environment()
+    agent = Agent(envs, device).to(device)
+    optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
+    if args.anneal_lr:
+        # https://github.com/openai/baselines/blob/ea25b9e8b234e6ee1bca43083f8f3cf974143998/baselines/ppo2/defaults.py#L20
+        lr = lambda f: f * args.learning_rate
 
     # ALGO Logic: Storage for epoch data
     obs = torch.zeros((args.num_steps, args.num_envs) + envs.observation_space.shape).to(
@@ -478,10 +574,30 @@ def train(envs, agent, args, writer, device, run=None, CHECKPOINT_FREQUENCY=None
             lrnow = lr(frac)
             optimizer.param_groups[0]["lr"] = lrnow
 
+    for update in range(starting_update, num_updates + 1):
+        # Annealing the rate if instructed to do so.
+        if args.anneal_lr:
+            frac = 1.0 - (update - 1.0) / num_updates
+            lrnow = lr(frac)
+            optimizer.param_groups[0]["lr"] = lrnow
+
         # TRY NOT TO MODIFY: prepare the execution of the game.
         for step in range(0, args.num_steps):
             # print(f"[DEBUG] get_value = {agent.get_value}")
             # envs.render()
+            global_step += 1 * args.num_envs
+            obs[step] = next_obs
+            dones[step] = next_done
+            # ALGO LOGIC: put action logic here
+            with torch.no_grad():
+                values[step] = agent.get_value(obs[step]).flatten()
+                action, logproba, _, invalid_action_masks[step] = agent.get_action(
+                    obs[step]
+                )
+        # TRY NOT TO MODIFY: prepare the execution of the game.
+        for step in range(0, args.num_steps):
+            # print(f"[DEBUG] get_value = {agent.get_value}")
+            envs.render()
             global_step += 1 * args.num_envs
             obs[step] = next_obs
             dones[step] = next_done
@@ -655,6 +771,31 @@ def train(envs, agent, args, writer, device, run=None, CHECKPOINT_FREQUENCY=None
             else:
                 if update % CHECKPOINT_FREQUENCY == 0:
                     torch.save(agent.state_dict(), f"{wandb.run.dir}/agent.pt")
+            if args.kle_stop:
+                if approx_kl > args.target_kl:
+                    break
+            if args.kle_rollback:
+                if (
+                    b_logprobs[minibatch_ind]
+                    - agent.get_action(
+                        b_obs[minibatch_ind],
+                        b_actions.long()[minibatch_ind].T,
+                        b_invalid_action_masks[minibatch_ind],
+                        envs,
+                    )[1]
+                ).mean() > args.target_kl:
+                    agent.load_state_dict(target_agent.state_dict())
+                    break
+
+        ## CRASH AND RESUME LOGIC:
+        if args.prod_mode:
+            if not os.path.exists(f"models/{experiment_name}"):
+                os.makedirs(f"models/{experiment_name}")
+                torch.save(agent.state_dict(), f"{wandb.run.dir}/agent.pt")
+                wandb.save(f"agent.pt")
+            else:
+                if update % CHECKPOINT_FREQUENCY == 0:
+                    torch.save(agent.state_dict(), f"{wandb.run.dir}/agent.pt")
 
         # TRY NOT TO MODIFY: record rewards for plotting purposes
         writer.add_scalar(
@@ -685,3 +826,12 @@ def main():
 
 if __name__ == "__main__":
     main()
+    envs.close()
+    writer.close()
+
+if __name__ == "__main__":
+    main()
+    print("Training completed successfully.")
+    if wandb.run is not None:
+        wandb.finish()
+    print("WandB run finished.")
