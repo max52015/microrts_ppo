@@ -21,15 +21,80 @@ import time
 import random
 import os
 from stable_baselines3.common.vec_env import VecEnvWrapper, VecVideoRecorder
+from stable_baselines3.common.vec_env import VecFrameStack
 
 
+# --------------------------- Wrapper: Boundary ---------------------------
+class BoundaryWrapper(VecEnvWrapper):
+    def __init__(self, venv: VecEnvWrapper):
+        super().__init__(venv)
+        self.boundary_map = None
+
+    def reset(self):
+        obs = self.venv.reset()  # shape: (batch, h, w, nf)
+        return self._add_boundary(obs)
+
+    def step_wait(self):
+        obs, rews, dones, infos = self.venv.step_wait()
+        return self._add_boundary(obs), rews, dones, infos
+
+    def _add_boundary(self, obs: np.ndarray) -> np.ndarray:
+        batch_size, h, w, _ = obs.shape
+        if self.boundary_map is None or self.boundary_map.shape != (h, w):
+            bm = np.zeros((h, w), dtype=np.float32)
+            bm[0, :] = 1
+            bm[-1, :] = 1
+            bm[:, 0] = 1
+            bm[:, -1] = 1
+            self.boundary_map = bm
+        b_map = np.tile(self.boundary_map[None, :, :, None], (batch_size, 1, 1, 1))
+        return np.concatenate([obs, b_map], axis=-1)
+
+
+# --------------------------- Wrapper: Attack Power One-hot Binning ---------------------------
+class AttackPowerOneHotWrapper(VecEnvWrapper):
+    def __init__(self, venv: VecEnvWrapper, json_path: str, damage_bins: list):
+        super().__init__(venv)
+        with open(json_path, "r") as f:
+            unit_table = json.load(f)["unitTypes"]
+        self.id_to_damage = {u["ID"]: u["maxDamage"] for u in unit_table}
+        self.damage_bins = damage_bins
+        self.num_bins = len(damage_bins)
+
+    def reset(self):
+        obs = self.venv.reset()
+        return self._add_attack_onehot(obs)
+
+    def step_wait(self):
+        obs, rews, dones, infos = self.venv.step_wait()
+        return self._add_attack_onehot(obs), rews, dones, infos
+
+    def _add_attack_onehot(self, obs: np.ndarray) -> np.ndarray:
+        batch_size, h, w, _ = obs.shape
+        unit_type_map = np.asarray(self.venv.vec_client.getUnitType(), dtype=np.int32)
+        onehot_map = np.zeros((batch_size, h, w, self.num_bins), dtype=np.float32)
+        for b in range(batch_size):
+            for i in range(h):
+                for j in range(w):
+                    utype = int(unit_type_map[b, i, j])
+                    if utype < 0:
+                        continue
+                    damage = self.id_to_damage.get(utype, 0)
+                    bin_idx = 0
+                    for k, thresh in enumerate(self.damage_bins):
+                        if damage <= thresh:
+                            bin_idx = k
+                            break
+                    onehot_map[b, i, j, bin_idx] = 1.0
+        return np.concatenate([obs, onehot_map], axis=-1)
+
+
+# --------------------------- Main Environment Setup with Extras ---------------------------
 def set_environment():
     run = None
     CHECKPOINT_FREQUENCY = 50
 
-    # Argument parsing
-    parser = argparse.ArgumentParser(description="PPO agent")
-    # Common args
+    parser = argparse.ArgumentParser(description="PPO agent with extra inputs")
     parser.add_argument(
         "--exp-name", type=str, default=os.path.basename(__file__).rstrip(".py")
     )
@@ -63,7 +128,6 @@ def set_environment():
     )
     parser.add_argument("--wandb-project-name", type=str, default="cleanRL")
     parser.add_argument("--wandb-entity", type=str, default=None)
-    # Algorithm-specific
     parser.add_argument("--n-minibatch", type=int, default=4)
     parser.add_argument("--num-envs", type=int, default=24)
     parser.add_argument("--num-steps", type=int, default=512)
@@ -113,6 +177,10 @@ def set_environment():
         nargs="?",
         const=True,
     )
+    parser.add_argument(
+        "--map-path", type=str, default="maps/16x16/basesWorkers16x16.xml"
+    )
+    parser.add_argument("--n-stack", type=int, default=4)
 
     args = parser.parse_args()
     if not args.seed:
@@ -120,30 +188,37 @@ def set_environment():
     args.batch_size = args.num_envs * args.num_steps
     args.minibatch_size = args.batch_size // args.n_minibatch
 
-    # Device setup
     device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
     print("CUDA available:", torch.cuda.is_available())
     print("CUDA version:", torch.version.cuda)
-    print(f"Using device: {device}")
+    print("Using device:", device)
 
-    # Seeding
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
     torch.backends.cudnn.deterministic = args.torch_deterministic
 
-    # Environment
+    # Base MicroRTS environment
     envs = MicroRTSVecEnv(
         num_envs=args.num_envs,
         max_steps=2000,
         render_theme=2,
         ai2s=[microrts_ai.coacAI for _ in range(args.num_envs)],
-        map_path="maps/16x16/basesWorkers16x16.xml",
+        map_path=args.map_path,
         reward_weight=np.array([10.0, 1.0, 1.0, 0.2, 1.0, 4.0]),
     )
-    envs = MicroRTSStatsRecorder(envs, args.gamma)
     envs = VecMonitor(envs)
+    # Add Boundary channels
+    envs = BoundaryWrapper(envs)
+    # Add Attack Power One-hot bins
+    damage_bins = [0, 1, 2, 4, 999]
+    json_path = os.path.join(os.path.dirname(__file__), "TestUnitTypeTable.json")
+    envs = AttackPowerOneHotWrapper(envs, json_path, damage_bins)
+    # Convert to PyTorch tensors
     envs = VecPyTorch(envs, device)
+    # Stack last n frames
+    envs = VecFrameStack(envs, n_stack=args.n_stack)
+    # Video recorder optional
     if args.capture_video:
         experiment_name = (
             f"{args.gym_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
@@ -154,9 +229,7 @@ def set_environment():
             record_video_trigger=lambda x: x % 1000000 == 0,
             video_length=2000,
         )
-
-    # Writer
-    experiment_name = f"{args.gym-id}__{args.exp_name}__{args.seed}__{int(time.time())}"
+    experiment_name = f"{args.gym_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
     writer = SummaryWriter(f"runs/{experiment_name}")
     writer.add_text(
         "hyperparameters",
@@ -164,20 +237,25 @@ def set_environment():
         % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
     )
 
-    # Optional wandb
-    if args.prod_mode:
+    if not args.prod_mode:
+        print("WandB without prod mode, if want plz use --prod-mode")
+    else:
         run = wandb.init(
             project=args.wandb_project_name,
             entity=args.wandb_entity,
             config=vars(args),
-            name=experiment_name,
+            name=args.exp_name,
             monitor_gym=True,
             save_code=True,
         )
         wandb.tensorboard.patch(save=False)
-        writer = SummaryWriter(f"/tmp/{experiment_name}")
+        writer = SummaryWriter(f"/tmp/{args.exp_name}_{int(time.time())}")
 
     return args, device, envs, writer, experiment_name, run, CHECKPOINT_FREQUENCY
+
+
+# The rest (Agent, training loop) remains same as original ppo_diverse_maxcho.py
+# Ensure Agent's first Conv2d input channels equals envs.observation_space.shape[-1] * 1 (since VecFrameStack)
 
 
 class VecMonitor(VecEnvWrapper):
@@ -215,7 +293,7 @@ class VecMonitor(VecEnvWrapper):
                 self.eprets[i] = 0
                 self.eplens[i] = 0
                 newinfos[i] = info
-        return obs, rews, dones, newinfos
+        return obs, rews, newinfos, dones
 
 
 class VecPyTorch(VecEnvWrapper):
@@ -235,7 +313,7 @@ class VecPyTorch(VecEnvWrapper):
     def step_wait(self):
         obs, reward, done, info = self.venv.step_wait()
         obs = torch.from_numpy(obs).float().to(self.device)
-        reward = torch.from_numpy(reward).unsqueeze(dim=1).float()
+        reward = torch.from_numpy(reward).unsqueeze(dim=1).float().to(self.device)
         return obs, reward, done, info
 
 
@@ -271,9 +349,7 @@ class MicroRTSStatsRecorder(VecEnvWrapper):
 class CategoricalMasked(Categorical):
     def __init__(self, *, logits, masks):
         super().__init__(
-            logits=torch.where(
-                masks, logits, torch.tensor(-1e8, device=logits.device)
-            )
+            logits=torch.where(masks, logits, torch.tensor(-1e8, device=logits.device))
         )
 
     def entropy(self):

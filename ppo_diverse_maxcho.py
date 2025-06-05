@@ -164,7 +164,9 @@ def set_environment():
     )
 
     # Optional wandb
-    if args.prod_mode:
+    if not args.prod_mode:
+        print("WandB without prod mode, if want plz use --prod-mode")
+    else:
         run = wandb.init(
             project=args.wandb_project_name,
             entity=args.wandb_entity,
